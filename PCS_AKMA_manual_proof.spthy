@@ -1,0 +1,345 @@
+theory pcs_akma begin
+
+// Function signature and definition of the equational theory E
+
+builtins: multiset
+functions: KDF/1, KDFFresh/3, Release/2, fst/1, noUpd/0, pair/2,
+           snd/1, upd/0, updSecret/2
+equations:
+    fst(<x.1, x.2>) = x.1,
+    snd(<x.1, x.2>) = x.2,
+    updSecret(noUpd, s) = s,
+    updSecret(upd, s) = KDF(s)
+
+heuristic: O "oracle_pcs.py"
+
+predicate: Smaller( x, y )<=>∃ z. (x+z) = y
+
+restriction onlyonce:
+  "∀ #i #j.
+    ((OnlyOnce( 'startCounter' ) @ #i) ∧
+     (OnlyOnce( 'startCounter' ) @ #j)) ⇒
+    (#i = #j)"
+  // safety formula
+
+rule (modulo E) startProcess:
+   [ Fr( ~supi ), Fr( ~afID ), Fr( ~k ), Fr( ~y ), Fr( ~z ) ]
+  --[ OnlyOnce( 'startCounter' ) ]->
+   [
+   Counter( '1' ), !State_0( ~supi, ~afID, ~k ),
+   OldK1( '1', KDFFresh(~supi, ~y, ~k) ),
+   OldK2( '1', KDFFresh(~supi, ~z, KDFFresh(~supi, ~y, ~k)) ),
+   OldK3( '1',
+          KDF(<~afID, KDFFresh(~supi, ~z, KDFFresh(~supi, ~y, ~k))>)
+   )
+   ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) reveal_s:
+   [ Release( index, s ) ] --[ Reveal( s ) ]-> [ Out( s ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) do_updateK1Branch:
+   [
+   Counter( index ), OldK1( index, K1 ), !State_0( ~supi, ~afID, ~k ),
+   Fr( ~y )
+   ]
+  --[ UpdateK1( KDFFresh(~supi, ~y, ~k), index, 'newKausf' ) ]->
+   [
+   State_1( ~supi, ~afID, ~k, index, KDFFresh(~supi, ~y, ~k) ),
+   OldK1( ('1'+index), KDFFresh(~supi, ~y, ~k) )
+   ]
+
+  // loop breaker: [1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) donot_updateK1Branch:
+   [
+   Counter( index ), OldK1( index, K1 ), !StopCond( stopAt ),
+   !State_0( ~supi, ~afID, ~k )
+   ]
+  --[ UpdateK1( K1, index, 'oldKausf' ) ]->
+   [ State_1( ~supi, ~afID, ~k, index, K1 ), OldK1( ('1'+index), K1 )
+   ]
+
+  // loop breaker: [1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) do_updateK2Branch:
+   [
+   State_1( ~supi, ~afID, ~k, index, K1 ), OldK2( index, K2 ),
+   Fr( ~z )
+   ]
+  --[ UpdateK2( KDFFresh(~supi, ~z, K1), index, 'beta_1' ) ]->
+   [
+   State_2( ~supi, ~afID, ~k, index, K1, KDFFresh(~supi, ~z, K1) ),
+   OldK2( ('1'+index), KDFFresh(~supi, ~z, K1) )
+   ]
+
+  // loop breakers: [0,1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) donot_updateK2Branch:
+   [ State_1( ~supi, ~afID, ~k, index, K1 ), OldK2( index, K2 ) ]
+  --[ UpdateK2( K2, index, 'beta_0' ) ]->
+   [
+   State_2( ~supi, ~afID, ~k, index, K1, K2 ),
+   OldK2( ('1'+index), K2 )
+   ]
+
+  // loop breakers: [0,1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) do_updateK3Branch:
+   [ State_2( ~supi, ~afID, ~k, index, K1, K2 ), OldK3( index, K3 ) ]
+  --[
+  UpdateK3( KDF(<~afID, K2>), index, 'alpha_1' ),
+  Secret( index, KDF(<~afID, K2>) )
+  ]->
+   [
+   State_3( ~supi, ~afID, ~k, index, K1, K2, KDF(<~afID, K2>) ),
+   OldK3( ('1'+index), KDF(<~afID, K2>) )
+   ]
+
+  // loop breaker: [1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) donot_updateK3Branch:
+   [ State_2( ~supi, ~afID, ~k, index, K1, K2 ), OldK3( index, K3 ) ]
+  --[ UpdateK3( K3, index, 'alpha_0' ), Secret( index, K3 ) ]->
+   [
+   State_3( ~supi, ~afID, ~k, index, K1, K2, K3 ),
+   OldK3( ('1'+index), K3 )
+   ]
+
+  // loop breaker: [1]
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) NoLeakBranch:
+   [ State_3( ~supi, ~afID, ~k, index, K1, K2, K3 ) ]
+  --[ Leak( index, 'dummy', 'False' ) ]->
+   [ Counter( ('1'+index) ) ]
+
+  /* has exactly the trivial AC variant */
+
+rule (modulo E) LeakBranch:
+   [ State_3( ~supi, ~afID, ~k, index, K1, K2, K3 ) ]
+  --[ Leak( index, K3, 'True' ) ]->
+   [ Counter( ('1'+index) ), Out( Release(index, K3) ) ]
+
+  /* has exactly the trivial AC variant */
+
+lemma MultipleRounds:
+  exists-trace
+  "∃ some_K1_1 status_1 some_K1_2 status_2 some_K1_3 status_3 #t01
+     #t02 #t03.
+    ((UpdateK1( some_K1_1, '1', status_1 ) @ #t01) ∧
+     (UpdateK1( some_K1_2, ('1'+'1'), status_2 ) @ #t02)) ∧
+    (UpdateK1( some_K1_3, ('1'+'1'+'1'), status_3 ) @ #t03)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ some_K1_1 status_1 some_K1_2 status_2 some_K1_3 status_3 #t01
+   #t02 #t03.
+  (UpdateK1( some_K1_1, '1', status_1 ) @ #t01) ∧
+  (UpdateK1( some_K1_2, ('1'+'1'), status_2 ) @ #t02) ∧
+  (UpdateK1( some_K1_3, ('1'+'1'+'1'), status_3 ) @ #t03)"
+*/
+by sorry
+
+lemma compromiseK3_simple:
+  exists-trace
+  "∃ #i #j K3.
+    (Leak( '1', K3, 'True' ) @ #i) ∧ (Secret( ('1'+'1'), K3 ) @ #j)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ #i #j K3.
+  (Leak( '1', K3, 'True' ) @ #i) ∧ (Secret( ('1'+'1'), K3 ) @ #j)"
+*/
+by sorry
+
+lemma compromiseK3_alpha:
+  all-traces
+  "∀ #t01 #t02 #t03 K3 K3_new.
+    (((Leak( '1', K3, 'True' ) @ #t01) ∧
+      (UpdateK3( K3_new, ('1'+'1'), 'alpha_0' ) @ #t02)) ∧
+     (Secret( ('1'+'1'), K3_new ) @ #t03)) ⇒
+    (K3_new = K3)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #t01 #t02 #t03 K3 K3_new.
+  (Leak( '1', K3, 'True' ) @ #t01) ∧
+  (UpdateK3( K3_new, ('1'+'1'), 'alpha_0' ) @ #t02) ∧
+  (Secret( ('1'+'1'), K3_new ) @ #t03)
+ ∧
+  ¬(K3_new = K3)"
+*/
+by sorry
+
+lemma compromiseK3_beta:
+  all-traces
+  "∀ #t01 #t02 #t03 #t04 K2 K2_new K3 K3_new.
+    ((((UpdateK2( K2, '1', 'beta_0' ) @ #t01) ∧
+       (Leak( '1', K3, 'True' ) @ #t02)) ∧
+      (UpdateK2( K2_new, ('1'+'1'), 'beta_0' ) @ #t03)) ∧
+     (Secret( ('1'+'1'), K3_new ) @ #t04)) ⇒
+    (K3_new = K3)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #t01 #t02 #t03 #t04 K2 K2_new K3 K3_new.
+  (UpdateK2( K2, '1', 'beta_0' ) @ #t01) ∧
+  (Leak( '1', K3, 'True' ) @ #t02) ∧
+  (UpdateK2( K2_new, ('1'+'1'), 'beta_0' ) @ #t03) ∧
+  (Secret( ('1'+'1'), K3_new ) @ #t04)
+ ∧
+  ¬(K3_new = K3)"
+*/
+by sorry
+
+lemma leaks_can_happen:
+  exists-trace
+  "∃ #t01 #t02 idx1 idx2 s.
+    (Secret( idx1, s ) @ #t01) ∧ (K( Release(idx2, s) ) @ #t02)"
+/*
+guarded formula characterizing all satisfying traces:
+"∃ #t01 #t02 idx1 idx2 s.
+  (Secret( idx1, s ) @ #t01) ∧ (K( Release(idx2, s) ) @ #t02)"
+*/
+simplify
+solve( Secret( idx1, s ) @ #t01 )
+  case do_updateK3Branch
+  solve( !KU( Release(idx2, KDF(<~afID, K2>)) ) @ #vk )
+    case LeakBranch_case_1
+    solve( State_2( ~supi, ~afID, ~k, idx1, K1,
+                    KDFFresh(~supi.1, ~z, K1.1)
+           ) ▶₀ #t01 )
+      case do_updateK2Branch
+      solve( State_1( ~supi, ~afID, ~k, idx1, K1 ) ▶₀ #vr.1 )
+        case do_updateK1Branch_case_1
+        solve( OldK1( '1', K1 ) ▶₁ #vr.2 )
+          case startProcess
+          solve( OldK2( '1', K2 ) ▶₁ #vr.1 )
+            case startProcess
+            solve( OldK3( '1', K3 ) ▶₁ #t01 )
+              case startProcess
+              SOLVED // trace found
+            qed
+          qed
+        qed
+      next
+        case do_updateK1Branch_case_2
+        by sorry
+      next
+        case do_updateK1Branch_case_3
+        by sorry
+      next
+        case do_updateK1Branch_case_4
+        by sorry
+      next
+        case do_updateK1Branch_case_5
+        by sorry
+      next
+        case do_updateK1Branch_case_6
+        by sorry
+      next
+        case do_updateK1Branch_case_7
+        by sorry
+      next
+        case do_updateK1Branch_case_8
+        by sorry
+      next
+        case do_updateK1Branch_case_9
+        by sorry
+      qed
+    next
+      case donot_updateK2Branch
+      by sorry
+    qed
+  next
+    case LeakBranch_case_2
+    by sorry
+  next
+    case LeakBranch_case_3
+    by sorry
+  next
+    case LeakBranch_case_4
+    by sorry
+  next
+    case c_Release
+    by sorry
+  qed
+next
+  case donot_updateK3Branch
+  by sorry
+qed
+
+lemma knowledge_implies_leakage:
+  all-traces
+  "∀ #t01 #t02 idx1 s.
+    (((Secret( idx1, s ) @ #t01) ∧ (K( s ) @ #t02)) ∧
+     (∃ z. (idx1+z) = ('1'+'1'+'1'))) ⇒
+    (∃ #j idx2. Leak( idx2, s, 'True' ) @ #j)"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #t01 #t02 idx1 s.
+  (Secret( idx1, s ) @ #t01) ∧ (K( s ) @ #t02)
+ ∧
+  (∃ z. ((idx1+z) = ('1'+'1'+'1'))) ∧
+  (∀ #j idx2. (Leak( idx2, s, 'True' ) @ #j) ⇒ ⊥)"
+*/
+by sorry
+
+lemma attackerRequiresLeak:
+  all-traces
+  "∀ #i s.
+    ((Secret( '1', s ) @ #i) ∧
+     (¬(∃ #j index. Leak( index, s, 'True' ) @ #j))) ⇒
+    (¬(∃ #r index. K( Release(index, s) ) @ #r))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #i s.
+  (Secret( '1', s ) @ #i)
+ ∧
+  (∀ #j index. (Leak( index, s, 'True' ) @ #j) ⇒ ⊥) ∧
+  (∃ #r index. (K( Release(index, s) ) @ #r))"
+*/
+by sorry
+
+lemma attackerCannotGetLeakAfter2Iters_expectedFail:
+  all-traces
+  "∀ #i s.
+    ((Secret( '1', s ) @ #i) ∧
+     (¬(∃ #j index.
+         (Leak( index, s, 'True' ) @ #j) ∧ (∃ z. (index+z) = ('1'+'1'))))) ⇒
+    (¬(∃ #r index. K( Release(index, s) ) @ #r))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #i s.
+  (Secret( '1', s ) @ #i)
+ ∧
+  (∀ #j index.
+    (Leak( index, s, 'True' ) @ #j)
+   ⇒
+    ∀ z. ((index+z) = ('1'+'1')) ⇒ ⊥) ∧
+  (∃ #r index. (K( Release(index, s) ) @ #r))"
+*/
+by sorry
+
+lemma knowledgeRequiresLeak:
+  all-traces
+  "∀ #i #k s index.
+    ((Secret( '1', s ) @ #i) ∧ (K( Release(index, s) ) @ #k)) ⇒
+    (∃ #j. (Leak( index, s, 'True' ) @ #j) ∧ (#j < #k))"
+/*
+guarded formula characterizing all counter-examples:
+"∃ #i #k s index.
+  (Secret( '1', s ) @ #i) ∧ (K( Release(index, s) ) @ #k)
+ ∧
+  ∀ #j. (Leak( index, s, 'True' ) @ #j) ⇒ ¬(#j < #k)"
+*/
+by sorry
+
+/* All well-formedness checks were successful. */
+
+end

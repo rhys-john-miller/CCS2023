@@ -1,0 +1,396 @@
+theory pcs_akma
+/* vertical key derivation chains
+
+K1-1                           		    K1-2
+  |                                       |
+  |                                       |
+ \ /                                     \ /
+K2-1      
+  |             \                         |
+  |    alpha=1,beta=0                alpha=1,beta=1
+  |                \                      |
+ \ /	          \ /                    \ /
+K3-1    =        K3-2                   K3-3    -- alpha=0 -->  K3-4= K3-3
+ i=1              i=2                    i=3                       i=4
+
+// imagine the above horizontal chain of K3s and
+ask yourself how many K3s in a chain can the attacker get,
+by controlling not just K2s  or K3s, but also the alpha and beta flags
+*/
+
+/*
+tamarin-prover 1.6.1
+
+benchmarking using a laptop with Intel(R) Core(TM) i7-1065G7 CPU @ 1.30GHz (4 cores/8 threads) and 32GB of RAM
+ 
+time tamarin-prover PCS_AKMA.spthy --prove && date
+
+
+==============================================================================
+summary of summaries:
+
+analyzed: PCS_AKMA.spthy
+
+  MultipleRounds (exists-trace): verified (24 steps)
+  compromiseK3_simple (exists-trace): verified (16 steps)
+  compromiseK3_alpha (all-traces): verified (128 steps)
+  compromiseK3_beta (all-traces): verified (103 steps)
+  knowledge_implies_leakage (all-traces): verified (85 steps)
+  attackerRequiresLeak (all-traces): verified (25 steps)
+  attackerCannotGetLeakAfter2Iters_expectedFail (all-traces): falsified - found trace (15 steps)
+  knowledgeRequiresLeak (all-traces): verified (37 steps)
+
+==============================================================================
+
+real	0m50.010s
+user	2m49.038s
+sys		1m5.171s
+Mon  1 May 16:57:33 BST 2023
+
+
+
+
+
+
+Note that there is 1 lemma which needs to be proved manually. To prove it please run
+
+tamarin-prover interactive . -Dmanual
+
+This will enable the following:
+ - leaks_can_happen
+
+The proof of that lemma is achieved by selecting the top proof goal until a trace is found.
+
+The PCS_tamarin_manual.spthy file contains that proof.
+
+*/
+
+
+begin
+
+heuristic: O "oracle_pcs.py"
+
+builtins: multiset
+
+//functions
+functions:
+		updSecret/2, 
+		KDF/1, 
+		KDFFresh/3,
+		upd/0,
+		noUpd/0,
+		Release/2
+		
+
+equations:
+		updSecret(upd, s) = KDF(s),
+		updSecret(noUpd, s) = s
+
+predicates:
+	Smaller(x,y) <=> Ex z. x + z = y
+
+
+//equality restriction
+//restriction equality:
+//    "All x y #i . Eq(x,y) @ i ==> (x = y)"
+
+	
+//lessthan restriction
+//restriction lessthan:
+//    "All x y #i . LessThan(x,y) @ i ==> Ex z . x+z=y"
+
+
+//onlyonce restriction
+restriction onlyonce:
+    "All  #i #j. OnlyOnce('startCounter') @ i & OnlyOnce('startCounter') @ j ==> (#i = #j)"
+
+rule startProcess:
+	let
+		//initiate the different keys
+		K1=KDFFresh(~supi,~y,~k)
+		K2=KDFFresh(~supi,~z, K1)
+		K3=KDF(~afID,K2)
+	in
+	[
+		  Fr(~supi) 	// (*a UE's/SIM's id*)
+		, Fr(~afID) 	// (*some application function id*)
+		, Fr(~k) 		// (*a UE's/SIM's key*)
+		, Fr(~y)    	// some randomness
+		, Fr(~z)    	// some randomness
+		
+	]
+	--[
+		OnlyOnce('startCounter')
+	]->
+	[
+	   Counter('1')
+	 , !State_0(~supi, ~afID, ~k)
+	 , OldK1('1', K1)
+	 , OldK2('1', K2)
+	 , OldK3('1', K3)
+	]
+
+/*
+The branching between update/no update of K1 is decided by whichever rule consumes Counter(index) first
+*/
+
+rule reveal_s:
+
+	[
+		Release(index,s)
+	]
+	--[
+		Reveal(s)
+	]->
+	[
+		Out(s)
+	]
+	
+rule do_updateK1Branch:
+	let 
+		new_K1=KDFFresh(~supi,~y,~k)
+	in
+	[
+		Counter(index)
+		, OldK1(index, K1)
+		, !State_0(~supi, ~afID, ~k)
+		, Fr(~y)
+	]
+	--[
+		  UpdateK1(new_K1, index, 'newKausf')
+	]->
+	[
+		  State_1(~supi, ~afID, ~k, index, new_K1)
+		, OldK1(index+'1', new_K1)
+	]
+
+rule donot_updateK1Branch:
+	[
+		Counter(index)
+		, OldK1(index, K1)
+		, !StopCond(stopAt)
+		, !State_0(~supi, ~afID, ~k)
+	]
+	--[
+		  UpdateK1(K1, index, 'oldKausf')
+	]->
+	[
+		  State_1(~supi, ~afID, ~k, index, K1)
+		, OldK1(index+'1', K1)
+	]
+
+/*
+The branching between update/no update of K2 is decided by whichever rule consumes State_1 first
+*/
+
+rule do_updateK2Branch:
+	let 
+		new_K2=KDFFresh(~supi,~z, K1)
+	in
+	[
+		  State_1(~supi, ~afID, ~k, index, K1)
+		, OldK2(index, K2)
+		, Fr(~z)
+	]
+	--[
+		  UpdateK2(new_K2, index, 'beta_1')
+	]->
+	[
+		  State_2(~supi, ~afID, ~k, index, K1, new_K2)
+		, OldK2(index+'1', new_K2)
+	]
+
+
+rule donot_updateK2Branch:
+
+	[
+		  State_1(~supi, ~afID, ~k, index, K1)
+		, OldK2(index, K2)
+	]
+	--[
+		  UpdateK2(K2, index, 'beta_0')
+	]->
+	[
+		  State_2(~supi, ~afID, ~k, index, K1, K2)
+		, OldK2(index+'1', K2)
+	]
+
+
+
+/*
+The branching between update/no update of K3 is decided by whichever rule consumes State_2 first
+*/
+rule do_updateK3Branch:
+	let 
+		new_K3=KDF(~afID,K2)
+	in
+	[
+		  State_2(~supi, ~afID, ~k, index, K1, K2)
+		, OldK3(index, K3)
+	]
+	--[
+		  UpdateK3(new_K3, index, 'alpha_1')
+		  , Secret(index, new_K3)
+	]->
+	[
+		  State_3(~supi, ~afID, ~k, index, K1, K2, new_K3)
+		, OldK3(index+'1', new_K3)
+	]
+	
+rule donot_updateK3Branch:
+
+	[
+		  State_2(~supi, ~afID, ~k, index, K1, K2)
+		, OldK3(index, K3)
+	]
+	--[
+		   UpdateK3(K3, index, 'alpha_0')
+		  , Secret(index, K3)
+	]->
+	[
+		  State_3(~supi, ~afID, ~k, index, K1, K2, K3)
+		, OldK3(index+'1', K3)
+	] 
+
+
+/*
+The branching between leak/no leak of K1 is decided by whichever rule consumes State_3 first
+*/
+	
+rule NoLeakBranch:
+	
+	[
+		  State_3(~supi, ~afID, ~k, index, K1, K2, K3)
+	]
+	--[
+		  Leak(index,'dummy', 'False')
+	]->
+	[
+		  Counter(index+'1')
+	]
+
+rule LeakBranch:
+	[
+		  State_3(~supi, ~afID, ~k, index, K1, K2, K3)
+	]
+	--[
+		  Leak(index, K3, 'True')
+	]->
+	[
+		  Counter(index+'1')
+		, Out(Release(index, K3)) // release the secret and the index
+	]
+
+
+
+
+
+/* we can have multiple iterations */
+lemma MultipleRounds: exists-trace
+" Ex some_K1_1 status_1 some_K1_2 status_2 some_K1_3 status_3 #t01 #t02 #t03.
+	  UpdateK1(some_K1_1, '1', status_1) @ t01 
+	& UpdateK1(some_K1_2, '1'+'1', status_2) @ t02
+	& UpdateK1(some_K1_3, '1'+'1'+'1', status_3) @ t03
+"
+
+/* 
+This shows that it is possible for the attacker to know K3 at several stages
+*/
+
+
+lemma compromiseK3_simple: exists-trace
+"Ex #i  #j  K3 .
+	Leak('1', K3, 'True') @ i  & Secret('1'+'1',K3)@j 
+"
+
+
+/* This shows that if the attacker controls alpha 
+   then they can ensure that from the point of leakage onwards they know the secret K3
+*/
+lemma compromiseK3_alpha:
+"All #t01  #t02 #t03 K3 K3_new .
+	Leak('1', K3, 'True') @ t01
+	& UpdateK3(K3_new, '1'+'1', 'alpha_0') @ t02
+	& Secret('1'+'1',K3_new) @ t03
+	==>
+	K3_new=K3
+"
+
+/* This shows that if the attacker controls beta then they can ensure that, 
+   provided they stop K2 from changing before the point of leakage and afterwards,
+   They will know K3 no matter if it updates or not as K2 remains the same
+*/
+lemma compromiseK3_beta:
+"All #t01  #t02 #t03 #t04 K2 K2_new K3 K3_new .
+	UpdateK2(K2, '1', 'beta_0') @ t01
+	& Leak('1', K3, 'True') @ t02
+	& UpdateK2(K2_new, '1'+'1', 'beta_0') @ t03
+	& Secret('1'+'1',K3_new) @ t04
+	==>
+	K3_new=K3
+"
+
+
+#ifdef manual
+//This is a
+/*very quick manual proof */
+lemma leaks_can_happen:exists-trace
+" Ex #t01 #t02 idx1 idx2 s. 
+	Secret(idx1, s) @ t01
+	&
+	K(Release(idx2,s)) @ t02
+"
+#endif
+
+
+
+//creating a secret at either stage 1 or 2 and the attacker knowing it means there was a leak.
+lemma knowledge_implies_leakage:
+"All #t01 #t02 idx1 s .
+	Secret(idx1, s) @ t01
+	&
+	K(s) @ t02
+	&
+	Smaller(idx1,'1'+'1'+'1')
+	==> 
+	(Ex #j idx2 . Leak(idx2, s, 'True') @ j)
+"
+
+//This should hold when we don't leak
+lemma attackerRequiresLeak:
+" All #i  s  . 
+		(
+		Secret('1', s) @ i //secret created in iteration 1
+		&
+		not(Ex #j index . Leak(index, s, 'True') @ j) //no leak
+		)
+		==>
+		(not (Ex #r index . K(Release(index, s)) @ r)) // no knowledge
+"
+
+
+//this should fail as we can leak at the third iteration
+lemma attackerCannotGetLeakAfter2Iters_expectedFail:
+" All #i  s . 
+		(
+		Secret('1', s) @ i //secret created in iteration 1
+		&
+		not(Ex #j index . Leak(index, s, 'True') @ j & Smaller(index,'1'+'1')) //no leak for the first for 2 iters
+		)
+		==>
+		(not (Ex #r index . K(Release(index, s)) @ r)) // no knowledge
+"
+
+//this just says the attacker again needs a leak before he knows the secret
+lemma knowledgeRequiresLeak:
+" All #i #k s index .
+		(
+		Secret('1', s) @ i //secret created in iteration 1
+		&
+		K(Release(index,s)) @ k
+		)
+		==>
+		(Ex #j . Leak(index, s, 'True') @ j & #j<#k)
+"
+
+end 

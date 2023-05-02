@@ -1,0 +1,299 @@
+(* 
+N.B.: 
+this file needs to be run with the Master branch of Proverif
+The commit of the Proverif version used was:
+2b7d52ede6598bf62b5dd59243297c8b9415b763 (25 April 2023)
+
+Do not use Proverif 2.04 or earlier as they have a bug that prevents this model from running successfully.
+
+To run successfully a PC with at least 32GB of RAM is required.
+
+*)
+
+(* vertical key derivation chains
+
+K1-1                           		    K1-2
+  |                                       |
+  |                                       |
+ \ /                                     \ /
+K2-1      
+  |             \                         |
+  |    alpha=1,beta=0                alpha=1,beta=1
+  |                \                      |
+ \ /	          \ /                    \ /
+K3-1    =        K3-2                   K3-3    -- alpha=0 -->  K3-4= K3-3
+ i=1              i=2                    i=3                       i=4
+
+// imagine the above horizontal chain of K3s and
+ask yourself how many K3s in a chain can the attacker get,
+by controlling not just K2s  or K3s, but also the alpha and beta flags
+*)
+
+(* Setting required to prove one of the  predicates' query *)
+
+set nounifIgnoreAFewTimes = auto.
+
+set preciseActions = true.
+
+set reconstructTrace = true . (* default is 4 *)
+
+const af:bitstring [ data ].  (*a label*)
+
+type key.
+free k: key. (*a UE's/SIM's key*)
+
+
+(*type used for inductive queries*)
+type stamp.
+
+(*system modelling parts*)
+free c:channel.
+free systemConstructionChannel: channel[private].
+
+free supi : bitstring. (*a UE's/SIM's id*)
+free afID : bitstring. (*some application function id*)
+
+
+(*obvious KDF functors*)
+fun kdf(bitstring, key) : key.
+fun kdfFresh(bitstring, bitstring, key) : key.
+
+(* keylist construction *)
+type keylist .
+
+(* our list expects a (k:key, i:nat, st:stamp) and a keylist *)
+fun conslist( key , nat, stamp, keylist ) : keylist [ data ] .
+
+(* the empty list *)
+const emptylist : keylist [ data ] .
+
+(* represents membership, ie is (k:key, i:nat, st:stamp) a member of keylist *)
+pred l_member( key , nat, stamp , keylist ) . 
+clauses
+	forall x : key , i:nat, st:stamp, kl: keylist ; l_member( x, i, st , conslist( x, i, st , kl )); (* (x,i, st) is at the top of the list *)
+	forall x1 : key , i1:nat, st1:stamp, kl : keylist , x2 : key , i2:nat, st2:stamp; l_member( x1, i1, st1 , kl ) -> l_member( x1, i1, st1 , conslist ( x2, i2, st2 , kl ) ) . (* (x1, i1, st1) is in the tail set *) 
+
+
+(*events to indicate leakage *)
+event effective_leakage_stamped ( bitstring, key, nat, stamp, keylist ).  
+
+(*events to indicate no leakage *)
+event no_leakage_stamped ( bitstring,  nat, stamp ).  
+
+
+(* the following events will be triggered for each iteration *)
+(* the bool at the end indicates whether or not the relevant key actually got refreshed *)
+(* the second event contains the state of the corresponding list of keys *)
+
+event K1_Refresh(nat, key, stamp, bool).
+event K1_state(nat, keylist).
+
+event K2_Refresh(nat, key, stamp, bool).
+event K2_state(nat, keylist).
+
+event K3_Refresh(nat, key, stamp, bool).
+event K3_state(nat, keylist).
+
+(* simple event to indicate the protocol round *)
+event key_evolution_round(nat).
+
+
+
+(* the i-th K3 function *)
+letfun k1GetterFunction(i:nat,supi:bitstring, k:key, k3Refresh:bool, K3_list:keylist) = 
+	if (i=0 || k3Refresh=true) then (
+		new y: bitstring; 
+        let x= kdfFresh(supi,y,k) in		
+			x
+	) else (
+		let x:key, st:stamp suchthat l_member(x, (i-1), st, K3_list ) in 
+			x
+	)
+.
+
+
+(*the i-th K2 function*)
+letfun k2GetterFunction(i:nat, supi:bitstring, k3:key, k2Refresh:bool, leak_k2:bool, K2_list:keylist) =
+	if (i=0 || k2Refresh=true) then (
+	    new z: bitstring; 
+		let x= kdfFresh(supi,z,k3) in
+			(* TODO: leak_k2 *)
+			x
+	) else (
+        let x:key, st:stamp suchthat l_member(x, (i-1), st, K2_list ) in 
+			(* TODO: leak_k2 *)
+			x
+	) 
+.
+
+
+(* the i-th K1 function *)
+letfun k3GetterFunction(i:nat,k2:key, k3Refresh:bool, K3_list:keylist) = 
+	if (i=0 || k3Refresh=true) then (
+		let  x = kdf(afID,k2) in  			
+			x
+	) else (
+        let x:key, st:stamp suchthat l_member(x, (i-1), st, K3_list ) in 
+			x
+	)
+.
+
+	 
+
+(*the i-th K3 process*)
+let k3Process(i:nat, supi:bitstring, k:key, afID:bitstring,
+                    K1_list:keylist, k1Refresh:bool, 
+					K2_list:keylist, k2Refresh:bool, 
+					K3_list:keylist, k3Refresh:bool,
+                    leak_k2:bool, leakage_k3:nat) =
+
+    new st1:stamp;
+    event key_evolution_round(i);
+    	
+	(* update all the keys in turn and insert them into their respective lists *)
+	
+	let k1:key = k1GetterFunction(i, supi, k, k1Refresh, K1_list) in
+		let K1_list_new=conslist(k1,i, st1, K1_list) in 	
+		event K1_Refresh(i, k1, st1, k1Refresh);
+		event K1_state(i,K1_list_new);
+	
+	let k2:key = k2GetterFunction(i, supi, k1,  k2Refresh, leak_k2, K2_list) in
+		let K2_list_new=conslist(k2,i, st1, K2_list) in 
+		event K2_Refresh(i, k2, st1, k2Refresh);
+		event K2_state(i,K2_list_new);
+	
+	let k3:key = k3GetterFunction(i, k2, k3Refresh, K3_list) in
+		let K3_list_new=conslist(k3,i, st1, K3_list) in 
+		event K3_Refresh(i, k3, st1, k3Refresh);
+		event K3_state(i,K3_list_new);
+
+	(* are we leaking the current k3 key? *)
+	if(leakage_k3 = i) then (	
+		event effective_leakage_stamped(af, k3, i, st1, K3_list_new);
+		out(c, k3); (* leak the key to the attacker*)
+		out(systemConstructionChannel, (i+1, K1_list_new, K2_list_new, K3_list_new)) (* continue to the next round *)
+	)
+	else (
+		(* no leakage *)
+		event no_leakage_stamped(af, i, st1);
+		out(systemConstructionChannel,(i+1, K1_list_new, K2_list_new, K3_list_new)) (* continue to the next round *)
+	)
+.
+
+
+
+let keyChain  =
+
+
+   (* unlike with tables, we need to pass the lists around, unfortunately *)
+   in(systemConstructionChannel,(i:nat,K1_list:keylist, K2_list:keylist, K3_list:keylist) ) [ precise ];
+   
+   (* non-deterministic choice of the different values... *)
+   (* we now leak at one fix point only... This is sufficient to reason about the desired behaviour *)
+   in(c,(k1Refresh:bool, k2Refresh:bool, k3Refresh:bool));
+   (* no limit on the number of iterations *)
+   
+(*                                    k1Refresh, k2Refresh, k3Refresh, leak_k2, leakage_k1)*)
+    k3Process(i, supi, k, afID, K1_list, k1Refresh, K2_list, k2Refresh, K3_list, k3Refresh, false, 1) 
+
+.
+
+
+(*========*)
+
+(* Expected Results 
+--------------------------------------------------------------
+Verification summary:
+
+Query event(key_evolution_round(i_1 + 1)) ==> event(key_evolution_round(i_1)) is true.
+
+Query not (event(K3_Refresh(1,k3_8,st1_1,k3Refresh_1)) && event(effective_leakage_stamped(af,k3_8,1,st2,k3list)) && attacker(k3_8)) is false.
+
+Query event(K3_Refresh(0,k3_8,st1_1,k3Refresh_1))@t1 && event(effective_leakage_stamped(af,k3_8,1,st1_1,k3list))@t2 && attacker(k3_8)@t3 ==> t2 > t1 && t3 > t2 is true.
+
+Query event(K3_Refresh(3,k3_8,st2,k3Refresh2)) && attacker(k3_8) ==> event(K3_Refresh(2,k3_8,st1_1,k3Refresh1)) is true.
+
+Query not (event(effective_leakage_stamped(af,k3_8,1,st1_1,k3list)) && event(K3_Refresh(2,k3_8,st2,false))) is false.
+
+Query not (event(effective_leakage_stamped(af,k3_8,1,st1_1,k3list)) && event(K3_Refresh(2,k3_8,st2,true))) is false.
+
+Query not (event(K2_Refresh(0,k2_4,st1_1,false)) && event(K3_Refresh(0,k3_8,st1_1,true)) && event(K2_Refresh(1,k2_4,st2,false)) && event(K3_Refresh(1,k3_8,st2,true))) is false.
+
+Query event(K3_state(2,K3_list2)) && l_member(k3_8,1,st1_1,K3_list2) ==> event(effective_leakage_stamped(af,k3_8,1,st1_1,K3_list1)) is true.
+
+Query event(K3_state(2,K3_list_1)) && attacker(k3_8) && l_member(k3_8,2,st2,K3_list_1) ==> l_member(k3_8,1,st1_1,K3_list_1) is true.
+
+--------------------------------------------------------------
+
+
+real	7m31.609s
+user	7m20.597s
+sys	0m5.126s
+Mon  1 May 15:07:30 BST 2023
+
+
+*)
+
+
+
+
+(*QUERIES *)
+
+(* Executability *)
+(* show that we have multiple key evolution rounds *)
+query i:nat; event(key_evolution_round(i+1))==> event(key_evolution_round(i)).
+
+
+(* PCS AKMA queries *)
+
+(* a trace exists that shows we create a key k3 at stage 1, leak it and the attacker knows it. *)
+query k3:key, i:nat, st1,st2:stamp, k3list:keylist, k3Refresh:bool; 
+	event(K3_Refresh(1, k3, st1, k3Refresh)) && event(effective_leakage_stamped(af, k3, 1, st2, k3list)) && attacker(k3) .
+	
+(* the attacker knows a key that was created in step 0, it must have been leaked at point 1... *)
+query t1,t2,t3:time, k3:key, i:nat, st1:stamp, k3list:keylist, k3Refresh:bool; 
+	(event(K3_Refresh(0, k3, st1, k3Refresh))@t1 && attacker(k3)@t3 && event(effective_leakage_stamped(af, k3, 1, st1, k3list))@t2) ==> ((t1<t2) && (t2<t3)).	
+
+(* This shows that it is possible for the attacker to know k3 at several stages
+If the attacker knows k3 and k3 has not changed at iteration 3 then it was also the same at step 2. *)
+query k3:key, st1,st2:stamp, k3list:keylist, k3Refresh1, k3Refresh2:bool; 
+  attacker(k3) && event (K3_Refresh(3, k3, st2, k3Refresh2)) ==> event (K3_Refresh(2, k3, st1, k3Refresh1)).
+
+(* This shows that if the attacker controls alpha 
+   then they can ensure that from the point of leakage onwards they know the secret k3
+   we leak at step 0 and then we ensure that K1_Refresh is false in step 1 
+   and use pattern matching to show they are the same. *)
+query k3:key, st1,st2:stamp, k3list:keylist;
+	event (effective_leakage_stamped(af, k3, 1, st1, k3list))  && event (K3_Refresh(2, k3, st2, false)) .
+
+(* Note, however, that k3 can stay the same even if K3_Refresh is true 
+   as k2 might not be new!!! *)
+query k3:key, st1,st2:stamp, k3list:keylist;
+	event (effective_leakage_stamped(af, k3, 1, st1, k3list))  && event (K3_Refresh(2, k3, st2, true)) .
+
+(* This shows that if the attacker controls beta then they can ensure that, 
+   provided they stop K3 from changing, they will know k3 (once leaked) 
+   even if it "refreshes" as k2 remains the same *)
+query k2,k3:key, st0,st1,st2:stamp;
+event (K2_Refresh(0, k2, st1, false)) (* if k2 is not updated in Iter 0 *) 
+&& event (K3_Refresh(0, k3, st1, true)) (* and we force a refresh of k3 *)
+&& event (K2_Refresh(1, k2, st2, false))  (* and k2 is not updated in Iter 1 *) 
+&& event (K3_Refresh(1, k3, st2, true)) . (* then k3 stays the same even when forced to refresh *)
+
+
+(* show that if we have a list at step 2 with k1 at position 1 then that is the key we leaked in step 1*)
+query K3_list1, K3_list2:keylist, k3:key, st1:stamp;
+	(event (K3_state(2,K3_list2)) && l_member(k3,1,st1, K3_list2)) ==> (event (effective_leakage_stamped(af, k3, 1, st1, K3_list1)) ). 
+	
+(* if the attacker knows k3 and k3 is also in the the K3_list in pos 2 then it must have been in pos 1, too, as that's when we leaked it*)
+
+query K3_list:keylist, st1,st2:stamp, k3:key; 
+   (attacker(k3) && event(K3_state(2,K3_list)) && l_member(k3,2,st2,K3_list)) ==> (l_member(k3,1,st1,K3_list) ).
+
+
+(* the main process *)
+process
+    (
+        out(systemConstructionChannel, (0, emptylist, emptylist, emptylist))| 
+        !keyChain
+    )  
